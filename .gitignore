@@ -1,0 +1,10 @@
+# Ignore PyTorch model files
+*.pt
+
+# Ignore checkpoint directories
+checkpoints/
+**/checkpoints/
+
+# (Optional) Ignore Jupyter notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
