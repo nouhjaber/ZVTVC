@@ -1,0 +1,444 @@
+# Generator (Module 4) v1.0 - Complete Configuration
+# Mel-Spectrogram Synthesis via Conditional Flow Matching
+
+version: "1.0"
+description: "UNet with Conditional Flow Matching for zero-shot voice conversion"
+
+# ============================================================================
+# MODEL ARCHITECTURE
+# ============================================================================
+model:
+  name: "FlowMatchingGenerator_v1.0"
+  architecture: "UNet_with_CFM"
+  parameters: "~25M"
+
+  # Flow matching method
+  flow_matching:
+    type: "conditional"  # Conditional Flow Matching (CFM)
+    forward_process: "linear_interpolation"  # Straight paths from noise to data
+    model_predicts: "velocity"  # Not noise (unlike DDPM)
+
+  # Input specifications
+  input:
+    # From other modules
+    content_dim: 512  # From Module 1
+    prosody_dim: 32   # From Module 3
+    timbre_dim: 256   # From Module 2
+
+    # Output
+    mel_channels: 80  # Output mel-spectrogram
+    mel_bins: 80
+    frame_rate: 50  # Hz
+
+  # UNet architecture
+  unet:
+    # Base configuration
+    model_channels: 256  # Base channel count
+    num_res_blocks: 2    # Per encoder/decoder block
+
+    # Channel progression
+    channel_mult: [1, 2, 2]  # [256, 512, 512]
+
+    # Attention configuration
+    attention_resolutions: [4]  # Self-attention at 1/4 resolution only
+    num_heads: 8
+    context_dim: 544  # content_dim + prosody_dim = 512 + 32
+
+    # Dropout
+    dropout: 0.1
+
+    # Architecture details
+    encoder_blocks: 3  # Enc1, Enc2, Enc3 (bottleneck)
+    decoder_blocks: 3  # Dec3, Dec2, Dec1
+
+    # Downsampling/Upsampling
+    downsample_method: "conv_stride2"  # Conv1d with stride=2
+    upsample_method: "nearest_conv"    # Nearest neighbor + conv
+
+  # Time embedding
+  time_embedding:
+    type: "sinusoidal"
+    embedding_dim: 256
+    max_period: 10000
+
+    # MLP after sinusoidal
+    mlp_hidden_dim: 512
+    activation: "silu"
+
+  # Conditioning strategy
+  conditioning:
+    # Content + Prosody (frame-level)
+    content_prosody:
+      method: "concatenation"  # Concat [512, 32] -> [544]
+      cross_attention: true     # Use in cross-attention
+      projection: false         # No projection, keep full 544D
+
+    # Timbre (global)
+    timbre:
+      method: "adaln"  # Adaptive Layer Normalization
+      combine_with_time: true
+      projection_dim: 512
+
+    # AdaLN (Adaptive Layer Normalization)
+    adaln:
+      enabled: true
+      modulation_params: 6  # γ1, β1, γ2, β2, α, gate
+      zero_init: true  # Initialize modulation to zero (AdaLN-Zero)
+
+  # Skip connections
+  skip_connections:
+    type: "concatenation"  # Standard UNet concatenation
+    # enc1 -> dec1, enc2 -> dec2, enc3 -> dec3 (bottleneck)
+
+# ============================================================================
+# FLOW MATCHING CONFIGURATION
+# ============================================================================
+flow_matching:
+  # Training
+  training:
+    # Time sampling
+    time_sampling: "uniform"  # t ~ Uniform(0, 1)
+    alternative: "logit_normal"  # If training unstable
+
+    # Interpolation
+    interpolation_type: "linear"  # x_t = (1-t)*x0 + t*x1
+
+    # Velocity target
+    velocity_target: "x1_minus_x0"  # v = x1 - x0 (constant velocity)
+
+  # Inference
+  inference:
+    # ODE solver
+    solver: "euler"  # Options: euler, midpoint, heun
+    num_steps: 10    # Default: 10 steps (optimal quality/speed)
+
+    # Alternative solvers
+    alternative_solvers:
+      midpoint:  # Better quality, 2× slower
+        num_steps: 5
+        calls_per_step: 2
+      heun:  # RK2, more accurate
+        num_steps: 10
+        calls_per_step: 2
+
+    # Classifier-free guidance (optional)
+    cfg:
+      enabled: false  # Start with false, enable if needed
+      guidance_scale: 1.5  # s parameter (1.0 = no guidance)
+      unconditional_prob: 0.1  # During training, drop conditions 10%
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Total training
+  total_iterations: 200000
+
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    learning_rate: 1e-4
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    eps: 1e-8
+    gradient_clip_norm: 1.0
+
+  # Scheduler
+  scheduler:
+    type: "cosine_annealing"
+    warmup_steps: 5000
+    total_steps: 200000
+    min_lr: 1e-6
+    eta_min: 1e-6
+
+  # Training strategy
+  strategy: "self_reconstruction"
+  # 90% self-reconstruction: Source = Reference = Target (same speaker)
+  # Model learns: Content + Prosody + Timbre -> Mel
+  # At inference: Change timbre -> Voice conversion!
+
+  # Batch configuration
+  batch:
+    batch_size: 16  # Base batch size
+    gradient_accumulation_steps: 1
+    effective_batch_size: 16
+    sequence_length: 400  # frames (8 seconds at 50Hz)
+    min_sequence: 100
+    max_sequence: 1500
+
+  # Mixed precision
+  mixed_precision:
+    enabled: true
+    precision: "fp16"
+    opt_level: "O1"
+
+  # Memory optimization
+  memory:
+    gradient_checkpointing: true  # Saves ~40% memory
+    clear_cache_frequency: 1000
+
+  # EMA (Exponential Moving Average)
+  ema:
+    enabled: true
+    decay: 0.9999
+    use_ema_for_inference: true
+
+  # Validation
+  validation:
+    frequency: 5000  # iterations
+    num_samples: 10
+    save_audio: true
+
+  # Checkpointing
+  checkpoint:
+    save_frequency: 5000
+    keep_last_n: 5
+    save_best: true
+    monitor_metric: "speaker_similarity"
+
+  # Logging
+  logging:
+    log_frequency: 100
+    tensorboard: true
+    wandb: false
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+data:
+  # Datasets (same as Modules 1-3)
+  datasets:
+    english: ["LibriTTS", "VCTK"]
+    arabic: ["Common Voice Arabic"]
+    hebrew: ["CoVoST Hebrew"]
+
+  # Total data: ~200 hours
+
+  # Audio preprocessing (must match Modules 1, 2, 3)
+  preprocessing:
+    sample_rate: 16000
+    mel_spectrogram:
+      fft_size: 1024
+      hop_length: 320  # 20ms = 50Hz frame rate
+      win_length: 1024
+      window: "hann"
+      n_mels: 80
+      fmin: 0
+      fmax: 8000
+      frame_rate: 50
+
+    normalization:
+      type: "per_utterance"
+      method: "mean_std"
+
+  # Encoder outputs
+  encoder_outputs:
+    # Option 1: Compute on-the-fly (simple, uses more compute)
+    compute_online: true
+    freeze_encoders: true  # Modules 1, 2, 3 are frozen
+
+    # Option 2: Pre-computed cache (faster, uses more storage)
+    use_cache: false
+    cache_dir: "./data/cache/encoder_outputs"
+    cache_size_estimate: "~100 GB"  # For 200 hours
+
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  persistent_workers: true
+
+# ============================================================================
+# LOSS FUNCTIONS
+# ============================================================================
+loss:
+  # Primary loss: Flow Matching
+  flow_matching:
+    enabled: true
+    type: "mse"
+    weight: 1.0
+    formula: "||v_pred - v_target||²"
+    # Where v_pred = UNet(x_t, t, conditions)
+    #       v_target = x1 - x0
+
+  # Auxiliary losses (optional, add complexity)
+  auxiliary:
+    # Mel reconstruction loss (expensive, requires full generation)
+    mel_reconstruction:
+      enabled: false
+      weight: 0.1
+      frequency: 1000  # Compute every N steps
+      type: "l1"
+
+    # Multi-resolution STFT loss (improves mel quality)
+    stft:
+      enabled: true  # ENABLED - helps prevent metallic sound
+      weight: 0.1    # λ for combined loss: flow_loss + λ * stft_loss
+      fft_sizes: [512, 1024, 2048]  # Multiple resolutions
+      sc_weight: 1.0   # Spectral convergence weight
+      mag_weight: 1.0  # Log magnitude weight
+
+    # Perceptual loss (requires generation)
+    perceptual:
+      enabled: false
+      weight: 0.1
+      encoder: "hubert"  # Pretrained encoder
+
+  # Loss weighting (time-dependent, optional)
+  time_weighting:
+    enabled: false
+    formula: "1 / (1 - t + ε)"  # Higher weight near t=1
+
+# ============================================================================
+# VALIDATION METRICS
+# ============================================================================
+validation:
+  metrics:
+    # Content preservation
+    wer:
+      enabled: true
+      target: "<8%"
+      asr_model: "whisper"  # Whisper for evaluation
+      languages: ["en", "ar", "he"]
+
+    # Speaker similarity
+    speaker_similarity:
+      enabled: true
+      target: ">0.70"
+      excellent: ">0.75"
+      encoder: "module2"  # Use Module 2 for evaluation
+
+    # Prosody preservation
+    f0_pcc:
+      enabled: true
+      target: ">0.80"
+      excellent: ">0.85"
+
+    # Naturalness (subjective)
+    mos:
+      enabled: false  # Requires human evaluation
+      target: ">4.0"
+
+  # Validation set
+  val_split: 0.05  # 5% of data
+  speaker_disjoint: true
+
+# ============================================================================
+# INTEGRATION WITH OTHER MODULES
+# ============================================================================
+integration:
+  # Module 1 (Content Encoder)
+  module1:
+    output_dim: 512
+    output_shape: [B, 512, T]
+    frozen: true
+
+  # Module 2 (Timbre Encoder)
+  module2:
+    output_dim: 256
+    output_shape: [B, 256]
+    frozen: true
+
+  # Module 3 (Prosody Encoder)
+  module3:
+    output_dim: 32
+    output_shape: [B, 32, T]
+    frozen: true
+
+  # Vocoder (HiFi-GAN)
+  vocoder:
+    name: "HiFi-GAN"
+    pretrained: "universal"
+    url: "https://github.com/jik876/hifi-gan"
+    latency: "~10ms"
+    fine_tune: false  # Can fine-tune if quality poor
+
+# ============================================================================
+# HARDWARE CONFIGURATION (Default)
+# ============================================================================
+hardware:
+  device: "cuda"
+  precision: "fp32"
+
+  batch:
+    batch_size: 16
+    gradient_accumulation_steps: 1
+    sequence_length: 400
+
+  data_loading:
+    num_workers: 4
+    pin_memory: true
+    prefetch_factor: 2
+
+# ============================================================================
+# CHECKPOINTING
+# ============================================================================
+checkpointing:
+  save_frequency: 5000
+  save_path: "./checkpoints/generator_v1.0"
+  auto_resume: true
+  keep_last_n: 5
+
+  save_components:
+    - "model_state_dict"
+    - "ema_state_dict"
+    - "optimizer_state_dict"
+    - "scheduler_state_dict"
+    - "iteration_number"
+    - "loss_history"
+    - "validation_metrics"
+
+# ============================================================================
+# PERFORMANCE TARGETS
+# ============================================================================
+performance:
+  # Inference latency (10 steps)
+  latency:
+    t4: "~80ms"
+    v100: "~50ms"
+    a100: "~35ms"
+
+  # Training time
+  training_time:
+    t4: "~28 hours"
+    v100: "~14 hours"
+    a100: "~8.5 hours"
+
+  # Total system latency (Modules 1-4 + Vocoder)
+  total_latency:
+    t4: "~145ms"
+    v100: "~96ms"
+    a100: "~67ms"
+
+  # Quality targets
+  quality:
+    speaker_similarity: ">0.70"
+    wer: "<8%"
+    f0_pcc: ">0.80"
+    mos: ">4.0"
+
+# ============================================================================
+# EXPERIMENTAL FEATURES
+# ============================================================================
+experimental:
+  # Different ODE solvers
+  advanced_solvers:
+    enabled: false
+    solver: "midpoint"  # Options: midpoint, heun, rk4
+
+  # Classifier-free guidance
+  cfg:
+    enabled: false
+    guidance_scale: 1.5
+
+  # Efficient attention
+  efficient_attention:
+    enabled: false
+    method: "xformers"  # Options: xformers, flash_attention
+
+  # Chunked processing (for very long audio)
+  chunked_processing:
+    enabled: false
+    chunk_size: 400  # frames
+    overlap: 0.5  # 50% overlap
+    blend_method: "linear"

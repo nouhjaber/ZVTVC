@@ -1,0 +1,64 @@
+# TIMBRE ENCODER CONFIG (clean)
+
+model:
+  ecapa_tdnn:
+    input_dim: 80
+    input_conv_channels: 128
+    attention_channels: 128
+    embedding_dim: 256
+    use_l2_norm: true
+    blocks_config:
+      - {in_channels: 128, out_channels: 256, kernel_size: 3, dilation: 2, scale: 4, se_reduction: 8}
+      - {in_channels: 256, out_channels: 256, kernel_size: 3, dilation: 3, scale: 4, se_reduction: 8}
+      - {in_channels: 256, out_channels: 256, kernel_size: 3, dilation: 4, scale: 4, se_reduction: 8}
+      - {in_channels: 256, out_channels: 256, kernel_size: 3, dilation: 5, scale: 4, se_reduction: 8}
+
+  sample_rate: 16000
+
+training:
+  seed: 42
+  use_amp: true
+  num_workers: 8
+  pin_memory: true
+
+  log_interval: 100
+  validation_interval: 2000
+  save_checkpoint_interval: 15000
+
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.001
+
+  loss:
+    type: info_nce
+    temperature: 0.05
+    use_hard_negatives: false
+
+  optimizer:
+    name: AdamW
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    gradient_clip_norm: 3.0
+
+  scheduler:
+    name: step
+    warmup_iterations: 2000
+    milestones: [60000]
+    gamma: 0.1
+    min_lr: 1.0e-6
+
+  batch:
+    speakers_per_batch: 32
+    utterances_per_speaker: 2
+
+  stages:
+    - stage_name: stage1_foundation
+      iterations: 60000
+      learning_rate: 0.001
+      enable_hard_negatives: false
+
+    - stage_name: stage2_refinement
+      iterations: 40000
+      learning_rate: 0.0001
+      enable_hard_negatives: true
+
+  total_iterations: 100000

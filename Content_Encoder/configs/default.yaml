@@ -1,0 +1,463 @@
+# Content Encoder v1.2 - Default Configuration
+# Zero-Shot Voice Conversion (2 Languages: English, Arabic)
+
+
+version: "1.2"
+
+# ============================================================================
+# MODEL ARCHITECTURE
+# ============================================================================
+model:
+  name: "ContentEncoder_v1.2"
+  type: "multi_scale_cnn"
+  languages: ["en", "ar"]  # English, Arabic
+
+  # Parameters
+  parameters:
+    encoder: 8000000  # ~8M
+    training_additions: 1200000  # ~1.2M for classifiers
+    total: 9200000  # ~9.2M
+
+  # Model size
+  size:
+    fp32: "32 MB"
+    fp16: "16 MB"
+
+  # Input specifications
+  input:
+    type: "mel_spectrogram"
+    shape: [B, 80, T]
+    mel_bins: 80
+    frame_rate: 50  # Hz
+    sample_rate: 16000
+    hop_length: 320  # 20ms frames
+    fft_size: 1024
+
+  # Pre-processing
+  preprocessing:
+    causal_conv1d:
+      in_channels: 80
+      out_channels: 256
+      kernel_size: 3
+      padding: [2, 0]  # Left-only for causality
+      activation: "leaky_relu"
+      leaky_relu_slope: 0.2
+      normalization: "layer_norm"
+
+  # Multi-scale encoder
+  encoder:
+    type: "hierarchical_fusion"
+
+    # Fine path (local phonetic detail)
+    fine_path:
+      purpose: "Phoneme boundaries, consonant transients"
+      num_blocks: 4
+      dilations: [1, 1, 1, 1]
+      receptive_field_ms: 360
+      channels: 256
+
+    # Medium path (syllable/word context)
+    medium_path:
+      purpose: "Syllable structure, coarticulation"
+      num_blocks: 4
+      dilations: [1, 2, 4, 1]
+      receptive_field_ms: 700
+      channels: 256
+
+    # Coarse path (phrase/prosodic context)
+    coarse_path:
+      purpose: "Phrase boundaries, prosodic patterns"
+      num_blocks: 5
+      dilations: [1, 4, 16, 4, 1]  # Pyramid pattern
+      receptive_field_ms: 1400
+      channels: 256
+
+    # Encoder block config
+    encoder_block:
+      kernel_size: 3
+      activation: "leaky_relu"
+      leaky_relu_slope: 0.2
+      normalization: "layer_norm"
+      dropout: 0.1
+      residual: true
+
+  # Hierarchical fusion
+  fusion:
+    type: "hierarchical_weighted_sum"
+
+    fusion_1:
+      inputs: ["fine_path", "medium_path"]
+      method: "weighted_sum"
+      weight_init: 0.0  # sigmoid(0) = 0.5
+
+    fusion_2:
+      inputs: ["fusion_1", "coarse_path"]
+      method: "weighted_sum"
+      weight_init: 0.0
+
+  # Information bottleneck
+  bottleneck:
+    type: "squeeze_expand_residual"
+    squeeze_dim: 128
+    expand_dim: 256
+    residual_enabled: true
+    residual_schedule:
+      stage_0: 0.5
+      stage_1: 0.3
+      stage_2: 0.1
+
+  # Output projection
+  output:
+    in_channels: 256
+    out_channels: 512
+    output_shape: [B, 512, T]
+    name: "Z_c"  # Content features
+
+  # Phoneme system
+  phoneme_system:
+    type: "single_head"
+    num_classes: 78
+
+    classifier:
+      hidden_dim: 256
+      dropout: 0.1
+      activation: "leaky_relu"
+
+    inventory:
+      english_phonemes: 44
+      arabic_phonemes: 34
+      shared_phonemes: 10
+      special_tokens: 10
+      total: 78
+
+    special_tokens:
+      - "<SIL>"  # Silence
+      - "<BRE>"  # Breath
+      - "<HES>"  # Hesitation
+      - "<WB>"   # Word boundary
+      - "<UNK>"  # Unknown
+      - "<NOI>"  # Non-speech noise
+      - "<LAU>"  # Laughter
+      - "<COU>"  # Cough
+      - "<SNI>"  # Sniff
+      - "<PAU>"  # Pause
+
+  # Speaker adversarial
+  speaker_adversarial:
+    enabled: true
+    type: "dual_parameter"
+    num_speakers: 100
+
+    architecture:
+      pooling: "global_average_pooling"
+      hidden_dim: 256
+      dropout: 0.3
+
+    dual_parameters:
+      lambda_adv:
+        description: "Loss weight"
+        range: [0.0, 0.05]
+      lambda_grl:
+        description: "Gradient reversal strength"
+        range: [0.0, 1.0]
+
+# ============================================================================
+# DATA CONFIGURATION
+# ============================================================================
+data:
+  # Datasets
+  datasets:
+    english:
+      recommended: ["LibriTTS-clean-100", "VCTK"]
+      minimum_hours: 100
+      recommended_hours: "200-300"
+
+    arabic:
+      recommended: ["Common Voice Arabic", "Arabic Speech Corpus"]
+      minimum_hours: 50
+      recommended_hours: "100-150"
+
+  # Audio preprocessing (GPU-accelerated with torchaudio)
+  audio_preprocessing:
+    sample_rate: 16000
+    bit_depth: 16
+    channels: 1
+    backend: "torchaudio"  # Use torchaudio for GPU acceleration
+    device: "auto"  # Auto-detect GPU/CPU
+
+    mel_spectrogram:
+      fft_size: 1024
+      hop_length: 320
+      win_length: 1024
+      window: "hann"
+      n_mels: 80
+      fmin: 0
+      fmax: 8000
+      frame_rate: 50
+
+    normalization:
+      type: "per_utterance"
+      method: "mean_std"
+      clip_value: 4.0
+
+    quality_checks:
+      min_duration: 2.0
+      max_duration: 20.0
+      min_snr: 15
+      max_silence_ratio: 0.3
+
+  # Data augmentation (GPU-accelerated)
+  augmentation:
+    enabled: true
+    device: "auto"  # Auto-detect GPU/CPU
+    
+    acoustic:
+      spec_augment:
+        enabled: true
+        probability: 0.2
+        time_mask: 15
+        freq_mask: 10
+
+      noise_injection:
+        enabled: true
+        probability: 0.2
+        snr_range: [15, 30]
+        noise_types: ["white", "pink", "brown", "room"]
+
+      reverb:
+        enabled: true
+        probability: 0.1
+        rt60_range: [0.1, 0.5]
+
+  # Phoneme alignment
+  phoneme_alignment:
+    tool: "Montreal Forced Aligner (MFA)"
+    
+    models:
+      english: "english_us_arpa"
+      arabic: "arabic_msa"
+
+    confidence_weighting:
+      low_threshold: 0.3
+      high_threshold: 0.7
+      interpolate: true
+
+  # Data balancing
+  balancing:
+    method: "temperature_sampling"
+    temperature: 0.3
+
+    # Loss weights for imbalanced dataset
+    loss_weights:
+      english: 1.0   # Baseline
+      arabic: 2.9    # sqrt(total/arabic_hours)
+
+  # Data splits
+  splits:
+    train: 0.90
+    validation: 0.05
+    test: 0.05
+    speaker_disjoint: true
+    stratify_language: true
+
+  # RAM Preloading (eliminates I/O bottleneck)
+  preloading:
+    enabled: true  # Load all audio to RAM before training
+    max_workers: 8  # Parallel loading threads
+    use_torchaudio: true  # Faster than librosa
+    show_progress: true
+    max_ram_usage_gb: null  # null = use all available
+
+# ============================================================================
+# LOSS FUNCTIONS
+# ============================================================================
+loss:
+  type: "uncertainty_weighted_multi_task"
+  num_tasks: 5
+
+  # Uncertainty parameters
+  uncertainty:
+    type: "learnable"
+    parameterization: "log_sigma"
+    initialization:
+      log_sigma_distill: 0.0
+      log_sigma_phoneme: 0.5
+      log_sigma_speaker: 1.0
+      log_sigma_contrast: 0.5
+      log_sigma_consist: 1.0
+
+  # Loss 1: Multi-teacher distillation
+  distillation:
+    enabled: true
+    device: "auto"  # Auto-detect, run on GPU if available
+    precision: "fp16"  # Use fp16 for teachers (2x speedup)
+    
+    teachers:
+      whisper:
+        model: "openai/whisper-large-v3"
+        output_dim: 1280
+        weight: 0.5
+        frozen: true
+
+      mhubert:
+        model: "facebook/mhubert-base-25langs"
+        output_dim: 768
+        weight: 0.3
+        frozen: true
+
+      ema:
+        type: "exponential_moving_average"
+        weight: 0.2
+        enabled_after: 10000
+        schedule:
+          stage_0: 0.99
+          stage_1: 0.995
+          stage_2: 0.999
+
+  # Loss 2: Phoneme classification
+  phoneme:
+    enabled: true
+    type: "cross_entropy"
+    classes: 78
+    label_smoothing: 0.1
+
+    confidence_weighting:
+      enabled: true
+      low_threshold: 0.3
+      high_threshold: 0.7
+
+    language_weights:
+      english: 1.0
+      arabic: 2.9
+
+  # Loss 3: Speaker adversarial
+  speaker_adversarial:
+    enabled: true
+    type: "adversarial_cross_entropy"
+
+    schedule:
+      - iterations: [0, 20000]
+        lambda_adv: 0.00
+        lambda_grl: 0.00
+      - iterations: [20000, 35000]
+        lambda_adv: 0.01
+        lambda_grl: 0.10
+      - iterations: [35000, 50000]
+        lambda_adv: 0.01
+        lambda_grl: 0.30
+      - iterations: [50000, 75000]
+        lambda_adv: 0.02
+        lambda_grl: 0.50
+      - iterations: [75000, 100000]
+        lambda_adv: 0.03
+        lambda_grl: 0.70
+      - iterations: [100000, 150000]
+        lambda_adv: 0.04
+        lambda_grl: 0.90
+      - iterations: [150000, 999999]
+        lambda_adv: 0.05
+        lambda_grl: 1.00
+
+  # Loss 4: Contrastive learning
+  contrastive:
+    enabled: true
+    type: "infonce"
+    temperature: 0.07
+
+    hard_negative_mining:
+      enabled: true
+      threshold: 0.5
+      weight: 2.0
+
+    similarity:
+      type: "cosine"
+      normalize: true
+
+  # Loss 5: Consistency regularization
+  consistency:
+    enabled: true
+    type: "mse"
+    optimized: true  # Use optimized version (no extra encoder pass)
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Total training
+  total_iterations: 225000
+
+  # Optimizer
+  optimizer:
+    type: "AdamW"
+    learning_rate:
+      encoder: 1e-4
+      heads: 1e-3
+    betas: [0.9, 0.999]
+    weight_decay: 0.01
+    eps: 1e-8
+    fused: "auto"  # Auto-enable fused optimizer on supported GPUs
+
+  # Scheduler
+  scheduler:
+    type: "cosine_warm_restarts"
+    warmup_iterations: 3000
+    T_0: 30000
+    T_mult: 2
+    min_lr: 1e-6
+
+  # Mixed Precision (auto-enabled on GPU)
+  mixed_precision:
+    enabled: "auto"  # Auto-enable on GPU
+    dtype: "fp16"  # fp16 or bf16 (bf16 for A100+)
+    
+  # Regularization
+  regularization:
+    dropout_encoder: 0.1
+    dropout_classifier: 0.3
+    label_smoothing: 0.1
+    gradient_clipping: 1.0
+
+  # Progressive training stages
+  stages:
+    stage_0:
+      name: "Bootstrap"
+      iterations: 50000
+      losses_active:
+        distill: true
+        phoneme: true
+        contrast: true
+        consist: true
+        speaker: false
+      adversarial:
+        lambda_adv: 0.0
+        lambda_grl: 0.0
+      ema_alpha: 0.99
+
+    stage_1:
+      name: "Self-Shifting"
+      iterations: 75000
+      losses_active:
+        distill: true
+        phoneme: true
+        contrast: true
+        consist: true
+        speaker: true
+      adversarial:
+        lambda_adv: [0.0, 0.02]
+        lambda_grl: [0.0, 0.50]
+      ema_alpha: 0.995
+
+    stage_2:
+      name: "Full Training"
+      iterations: 100000
+      losses_active:
+        distill: true
+        phoneme: true
+        contrast: true
+        consist: true
+        speaker: true
+      adversarial:
+        lambda_adv: [0.02, 0.05]
+        lambda_grl: [0.50, 1.00]
+      ema_alpha: 0.999
+

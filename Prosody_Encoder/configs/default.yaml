@@ -1,0 +1,148 @@
+# Prosody Encoder v1.1 - Default Configuration
+# Zero-Shot Voice Conversion (ZVTVC)
+#
+# Architecture: Explicit Features + Light CNN Refinement
+# Input: Audio waveform [B, L] at 16kHz
+# Output: Refined prosody [B, 32, T] at 50Hz frame rate
+
+version: "1.1"
+description: "Explicit prosody features with learned refinement (StreamVC-inspired)"
+
+# ============================================================================
+# FEATURE EXTRACTION (non-trainable)
+# ============================================================================
+features:
+  sample_rate: 16000
+  hop_length: 320        # 20ms frames → 50Hz
+  frame_rate: 50
+
+  f0:
+    method: "pyin"       # 'pyin' or 'crepe'
+    fmin: 50.0
+    fmax: 600.0
+    log_transform: true
+    whitening: true      # Critical for speaker-independent prosody
+
+  energy:
+    log_transform: true
+    whitening: true
+
+  voicing:
+    method: "from_f0"
+
+  rhythm:
+    method: "local_voicing_rate"
+    window_size: 11      # 220ms at 50Hz
+
+# ============================================================================
+# MODEL ARCHITECTURE (trainable)
+# ============================================================================
+model:
+  name: "ProsodyEncoder_v1.1"
+  explicit_dim: 4        # [f0, energy, voicing, rhythm]
+  refined_dim: 32        # Output dimension
+
+  refinement_network:
+    type: "light_cnn"
+    layers: 3
+    channels: 32
+    kernel_sizes: [3, 5, 5]
+    dilations: [1, 1, 2]
+    dropout: 0.1
+    activation: "leaky_relu"
+    leaky_relu_slope: 0.2
+    normalization: "layer_norm"   # No BatchNorm
+    use_residual: true
+
+  reconstruction_heads:
+    enabled: true
+    features:
+      f0: "continuous"       # MSE loss
+      energy: "continuous"   # MSE loss
+      voicing: "binary"      # BCE loss (sigmoid in head)
+      rhythm: "continuous"   # MSE loss
+
+  output_format: "refined"   # 'explicit', 'refined', or 'combined'
+
+# ============================================================================
+# LOSS FUNCTIONS
+# ============================================================================
+loss:
+  reconstruction_weight: 1.0
+  consistency_weight: 0.5
+  smoothness_weight: 0.1
+
+  reconstruction:
+    f0_weight: 1.0
+    energy_weight: 1.0
+    voicing_weight: 1.0
+    rhythm_weight: 1.0
+    voicing_loss_type: "bce"
+
+  consistency:
+    distance_metric: "mse"
+
+  smoothness:
+    order: 1
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Auto-calculated from batch_size (reference: batch=16, lr=1e-4, 50k iters)
+  base_batch_size: 16
+  base_lr: 1.0e-4
+  base_total_iterations: 50000
+  warmup_ratio: 0.02
+
+  optimizer:
+    type: "AdamW"
+    weight_decay: 1.0e-4
+    betas: [0.9, 0.999]
+
+  scheduler:
+    type: "cosine_with_warmup"
+    eta_min_ratio: 0.01     # eta_min = lr * 0.01
+
+  regularization:
+    gradient_clipping: 1.0
+
+  augmentation:
+    enabled: true
+    noise_snr_range: [40, 50]
+    pitch_shift_semitones: [-0.3, 0.3]
+
+# ============================================================================
+# DATA
+# ============================================================================
+data:
+  sequence_length: 200     # frames (4 seconds at 50Hz)
+  num_workers: null         # null = auto-detect
+  batch_size: null          # null = auto-detect
+
+# ============================================================================
+# CHECKPOINTING & LOGGING
+# ============================================================================
+checkpointing:
+  save_frequency: 5000
+  save_path: "./checkpoints/prosody_encoder"
+  keep_last_n: 5
+
+logging:
+  log_interval: 100
+  val_interval: 2000
+
+# ============================================================================
+# INFERENCE
+# ============================================================================
+inference:
+  output_format: "refined"
+  device: "auto"
+
+# ============================================================================
+# DESIGN RULES (ZVTVC-wide)
+# ============================================================================
+# - No BatchNorm (use LayerNorm)
+# - No ReLU (use LeakyReLU 0.2)
+# - No Transformers (Conv1D only)
+# - No VQ/K-means (continuous representations)
